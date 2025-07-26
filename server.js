@@ -19,6 +19,9 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// Utility function to replace page.waitForTimeout
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 // Middleware
 app.use(cors());
 app.use(express.json());
@@ -46,7 +49,7 @@ class BrowserManager {
       // Wait for ongoing initialization
       let attempts = 0;
       while (this.isInitializing && attempts < 30) { // Wait up to 15 seconds
-        await new Promise(resolve => setTimeout(resolve, 500));
+        await delay(500);
         attempts++;
       }
     }
@@ -98,7 +101,7 @@ class BrowserManager {
               timeout: 30000
               // Removed executablePath - let Puppeteer find Chrome automatically
             };
-            const ec=puppeteer.executablePath();
+            const ec = puppeteer.executablePath();
             console.log(ec);
             this.browser = await puppeteer.launch(browserOptions);
             
@@ -129,7 +132,7 @@ class BrowserManager {
             
             // Wait before retry with exponential backoff
             const waitTime = Math.min(2000 * Math.pow(2, this.initAttempts - 1), 10000);
-            await new Promise(resolve => setTimeout(resolve, waitTime));
+            await delay(waitTime);
           }
         }
       } finally {
@@ -271,8 +274,8 @@ async function analyzePage(targetUrl) {
             throw new Error(`HTTP ${status}: ${response.statusText()}`);
           }
           
-          // Additional wait for dynamic content
-          await page.waitForTimeout(2000);
+          // Additional wait for dynamic content - FIXED: Use delay instead of page.waitForTimeout
+          await delay(2000);
           
           // Check if page actually loaded content
           const title = await page.title().catch(() => '');
@@ -294,7 +297,7 @@ async function analyzePage(targetUrl) {
           
           if (navigationRetries > 0) {
             console.log(`Retrying navigation in 2 seconds... (${navigationRetries} attempts remaining)`);
-            await page.waitForTimeout(2000);
+            await delay(2000); // FIXED: Use delay instead of page.waitForTimeout
           } else {
             // Provide more specific error messages based on the error type
             let errorMessage = error.message;
