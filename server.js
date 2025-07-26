@@ -98,7 +98,8 @@ class BrowserManager {
               timeout: 30000
               // Removed executablePath - let Puppeteer find Chrome automatically
             };
-
+            const ec=puppeteer.executablePath();
+            console.log(ec);
             this.browser = await puppeteer.launch(browserOptions);
             
             // Test browser connectivity
