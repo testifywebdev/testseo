@@ -32,7 +32,7 @@ app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// --- Enhanced Browser Manager (from original code, with minor logging tweaks) ---
+// --- Enhanced Browser Manager (Stable from previous version) ---
 class BrowserManager {
   constructor() {
     this.browser = null;
@@ -78,7 +78,7 @@ class BrowserManager {
                 '--disable-accelerated-2d-canvas',
                 '--no-first-run',
                 '--no-zygote',
-                '--single-process',
+                '--single-process', // This can help in resource-constrained environments
                 '--disable-gpu',
               ],
               headless: true,
@@ -137,6 +137,7 @@ class BrowserManager {
 
 const browserManager = new BrowserManager();
 
+
 // --- Analysis Helper Functions ---
 
 async function getPageContent(targetUrl) {
@@ -148,6 +149,11 @@ async function getPageContent(targetUrl) {
         await page.setViewport({ width: 1920, height: 1080 });
         page.setDefaultNavigationTimeout(60000); // 60 second timeout for navigation
 
+        const consoleErrors = [];
+        page.on('pageerror', error => {
+            consoleErrors.push(error.message);
+        });
+
         const response = await page.goto(targetUrl, { waitUntil: 'networkidle2' });
         
         if (!response) {
@@ -156,28 +162,29 @@ async function getPageContent(targetUrl) {
 
         const status = response.status();
         if (status >= 400) {
-            throw new Error(`HTTP Error: Received status code ${status}`);
+            // For 4xx/5xx errors, we can still try to get content for analysis
+             const errorContent = await page.content().catch(() => `<html><body>HTTP ${status} error.</body></html>`);
+             return { content: errorContent, headers: response.headers(), consoleErrors, status };
         }
 
         const content = await page.content();
         const headers = response.headers();
-        const consoleErrors = [];
-        page.on('pageerror', error => {
-            consoleErrors.push(error.message);
-        });
 
         await delay(1000); // Wait a bit for async errors to be captured
 
-        return { content, headers, consoleErrors };
+        return { content, headers, consoleErrors, status };
     } finally {
-        if (page) {
+        if (page && !page.isClosed()) {
             await page.close();
         }
     }
 }
 
+// **FIXED**: Added a robust timeout to Lighthouse analysis
 async function runLighthouseAnalysis(targetUrl) {
     let chrome = null;
+    const lighthouseTimeout = 90 * 1000; // 90 seconds
+
     try {
         console.log('Starting Lighthouse analysis...');
         chrome = await chromeLauncher.launch({
@@ -191,8 +198,13 @@ async function runLighthouseAnalysis(targetUrl) {
             emulatedFormFactor: 'desktop'
         };
 
-        const runnerResult = await lighthouse(targetUrl, options, undefined);
-        console.log('Lighthouse analysis finished.');
+        const lighthousePromise = lighthouse(targetUrl, options);
+        const timeoutPromise = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('Lighthouse analysis timed out after 90 seconds.')), lighthouseTimeout)
+        );
+
+        const runnerResult = await Promise.race([lighthousePromise, timeoutPromise]);
+        console.log('Lighthouse analysis finished successfully.');
 
         if (!runnerResult || !runnerResult.lhr) {
             throw new Error('Lighthouse returned no results.');
@@ -217,9 +229,10 @@ async function runLighthouseAnalysis(targetUrl) {
     }
 }
 
+
 async function getSslInfo(hostname) {
     return new Promise((resolve, reject) => {
-        const options = { host: hostname, port: 443, servername: hostname, rejectUnauthorized: false };
+        const options = { host: hostname, port: 443, servername: hostname, rejectUnauthorized: true }; // Use true for real validation
         const socket = tls.connect(options, () => {
             const cert = socket.getPeerCertificate();
             socket.end();
@@ -229,12 +242,12 @@ async function getSslInfo(hostname) {
             resolve({
                 subject: cert.subject?.CN || 'N/A',
                 issuer: cert.issuer?.CN || 'N/A',
-                validFrom: cert.valid_from,
-                validTo: cert.valid_to,
+                validFrom: new Date(cert.valid_from).toLocaleDateString(),
+                validTo: new Date(cert.valid_to).toLocaleDateString(),
                 isExpired: new Date(cert.valid_to) < new Date(),
             });
         });
-        socket.on('error', (err) => reject(err));
+        socket.on('error', (err) => reject(new Error(`SSL Error: ${err.message}`)));
         socket.setTimeout(5000, () => {
             socket.destroy();
             reject(new Error('SSL connection timed out.'));
@@ -252,11 +265,10 @@ function calculateScores(results) {
             const score = ((category.passed.length + (category.warnings.length * 0.5)) / totalChecks) * 100;
             category.score = Math.round(score);
         } else {
-            category.score = 100; // Default to 100 if no checks were run
+            category.score = 100;
         }
     });
 
-    // Calculate overall score (weighted average)
     const weights = { commonSeo: 0.3, speed: 0.3, security: 0.15, mobile: 0.15, advancedSeo: 0.1 };
     let totalScore = 0;
     let totalWeight = 0;
@@ -294,16 +306,14 @@ app.post('/api/analyze', async (req, res) => {
     console.log(`Starting analysis for: ${targetUrl}`);
 
     try {
-        // --- 1. Fetch and Parse Content ---
-        const { content, headers, consoleErrors } = await getPageContent(targetUrl);
+        const { content, headers, consoleErrors, status } = await getPageContent(targetUrl);
         const $ = cheerio.load(content);
 
         const results = {
             analyzedUrl: targetUrl,
+            responseStatus: status,
             overallScore: 0,
-            totalFailed: 0,
-            totalWarnings: 0,
-            totalPassed: 0,
+            totalFailed: 0, totalWarnings: 0, totalPassed: 0,
             commonSeo: { score: 0, failed: [], warnings: [], passed: [] },
             speed: { score: 0, failed: [], warnings: [], passed: [] },
             security: { score: 0, failed: [], warnings: [], passed: [] },
@@ -315,10 +325,9 @@ app.post('/api/analyze', async (req, res) => {
             sslInfo: {},
         };
 
-        // --- 2. Run All Checks in Parallel ---
         const lighthousePromise = runLighthouseAnalysis(targetUrl).catch(err => {
             console.error("Lighthouse analysis failed:", err.message);
-            return { error: 'Lighthouse analysis failed or timed out.', message: err.message };
+            return { error: 'Lighthouse analysis failed.', message: err.message };
         });
         
         const sslPromise = parsedUrl.protocol === 'https:' ? getSslInfo(parsedUrl.hostname).catch(err => {
@@ -326,10 +335,7 @@ app.post('/api/analyze', async (req, res) => {
             return { error: 'SSL Info not available.', message: err.message };
         }) : Promise.resolve({ info: 'Site is not using HTTPS.'});
 
-
-        // --- 3. Perform Cheerio-based checks while async checks run ---
-        
-        // Common SEO Checks
+        // --- Perform Cheerio-based checks ---
         const title = $('title').text().trim();
         results.metaInfo.title = title || 'Missing title tag';
         if (title) {
@@ -361,57 +367,50 @@ app.post('/api/analyze', async (req, res) => {
         }
 
         if (consoleErrors.length === 0) results.commonSeo.passed.push('No JavaScript errors detected in the console.');
-        else results.commonSeo.warnings.push(`Detected ${consoleErrors.length} JavaScript errors in the console.`);
+        else results.commonSeo.failed.push(`Detected ${consoleErrors.length} JavaScript errors in the console.`);
         results.technicalInfo.consoleErrors = consoleErrors;
 
-        // Speed Checks
         const inlineCssCount = $('style').length + $('[style]').length;
         if (inlineCssCount > 10) results.speed.warnings.push(`High use of inline CSS (${inlineCssCount} instances). Consider moving to external stylesheets.`);
         else results.speed.passed.push('Low usage of inline CSS styles.');
 
-        const htmlSize = Buffer.byteLength(content, 'utf-8') / 1024; // in KB
+        const htmlSize = Buffer.byteLength(content, 'utf-8') / 1024;
         results.technicalInfo.htmlSizeKB = parseFloat(htmlSize.toFixed(2));
         if (htmlSize < 50) results.speed.passed.push(`HTML page size is small (${results.technicalInfo.htmlSizeKB} KB).`);
         else results.speed.warnings.push(`HTML page size is ${results.technicalInfo.htmlSizeKB} KB. Consider reducing it.`);
 
-        // Security Checks
         if (parsedUrl.protocol === 'https:') {
-            results.security.passed.push('Site uses HTTPS, which is secure.');
+            results.security.passed.push('Site uses HTTPS.');
             if (content.includes('http://')) results.security.warnings.push('Mixed content warning: Page loads assets over insecure HTTP.');
-            else results.security.passed.push('No mixed content (HTTP assets on HTTPS page) detected.');
+            else results.security.passed.push('No mixed content detected.');
         } else {
-            results.security.failed.push('Site does not use HTTPS. This is a major security risk.');
+            results.security.failed.push('Site does not use HTTPS. This is a major security and SEO issue.');
         }
 
         if (headers['strict-transport-security']) results.security.passed.push('HTTP Strict Transport Security (HSTS) header is present.');
-        else results.security.warnings.push('HSTS header is not present, leaving the site vulnerable to man-in-the-middle attacks.');
+        else results.security.warnings.push('HSTS header is not present.');
 
-        if (!headers['server']) results.security.passed.push('Server signature is hidden, which is a good security practice.');
-        else results.security.warnings.push(`Server signature is visible: ${headers['server']}.`);
-        
-        // Mobile Checks
         const viewport = $('meta[name="viewport"]').attr('content');
         if (viewport && viewport.includes('width=device-width')) results.mobile.passed.push('A mobile-friendly viewport is configured.');
         else results.mobile.failed.push('Viewport meta tag is missing or misconfigured.');
 
-        // Advanced SEO Checks
         const canonical = $('link[rel="canonical"]').attr('href');
-        if (canonical) results.advancedSeo.passed.push(`Canonical tag found, pointing to: ${canonical}`);
-        else results.advancedSeo.warnings.push('No canonical tag found. This can lead to duplicate content issues.');
-        results.metaInfo.canonical = canonical || 'N/A';
+        if (canonical) results.advancedSeo.passed.push(`Canonical tag found: ${canonical}`);
+        else results.advancedSeo.warnings.push('No canonical tag found.');
         
-        if ($('script[type="application/ld+json"]').length > 0) results.advancedSeo.passed.push('Structured data (JSON-LD) was found on the page.');
+        if ($('script[type="application/ld+json"]').length > 0) results.advancedSeo.passed.push('Structured data (JSON-LD) was found.');
         else results.advancedSeo.warnings.push('No structured data (JSON-LD) was found.');
 
         if ($('link[rel*="icon"]').length > 0) results.advancedSeo.passed.push('A favicon is specified.');
         else results.advancedSeo.failed.push('Favicon link is missing.');
-
-        // --- 4. Await and Process Async Results ---
+        
+        if (status === 404) results.advancedSeo.failed.push('The page returned a 404 Not Found status.');
+        else if (status >= 400) results.advancedSeo.failed.push(`The page returned an error status: ${status}.`);
+        else results.advancedSeo.passed.push(`Page loaded successfully with status ${status}.`);
+        
+        // Await and Process Async Results
         results.lighthouseReport = await lighthousePromise;
         if (!results.lighthouseReport.error) {
-            results.speed.score = results.lighthouseReport.performance;
-            results.mobile.score = results.lighthouseReport.accessibility;
-            // Add Lighthouse data to checks
             if(results.lighthouseReport.renderBlockingResources === 0) {
                 results.speed.passed.push('No render-blocking resources found by Lighthouse.');
             } else {
@@ -427,10 +426,10 @@ app.post('/api/analyze', async (req, res) => {
                 results.security.passed.push(`SSL certificate is valid until ${results.sslInfo.validTo}.`);
             }
         } else if (results.sslInfo.error) {
-            results.security.warnings.push(`Could not verify SSL certificate: ${results.sslInfo.error}`);
+            results.security.failed.push(`Could not verify SSL certificate: ${results.sslInfo.message}`);
         }
 
-        // --- 5. Calculate Final Scores and Send Response ---
+        // Calculate Final Scores and Send Response
         calculateScores(results);
         results.analysisTimeMs = Date.now() - analysisStartTime;
         console.log(`Analysis for ${targetUrl} completed in ${results.analysisTimeMs}ms. Score: ${results.overallScore}`);
@@ -441,39 +440,40 @@ app.post('/api/analyze', async (req, res) => {
         console.error(`[Analysis Error] for ${targetUrl}:`, error);
         res.status(500).json({
             error: 'Failed to analyze URL.',
-            details: error.message,
-            suggestions: [
-                'Ensure the URL is correct and the website is online.',
-                'The website may be blocking automated tools or requests.',
-                'The server may be down or experiencing high traffic.'
-            ]
+            details: error.message
         });
     }
 });
 
 
-// --- Server Start and Health Checks ---
+// --- Server Start and Graceful Shutdown ---
 
-app.get('/api/health', async (req, res) => {
-  const browserHealth = await browserManager.isBrowserHealthy();
-  res.json({ 
-    status: 'OK', 
-    timestamp: new Date().toISOString(),
-    browserHealthy: browserHealth
-  });
-});
-
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`SEO Analyzer server running on http://localhost:${PORT}`);
-  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
 });
 
-// --- Graceful Shutdown ---
-const gracefulShutdown = async (signal) => {
+const gracefulShutdown = (signal) => {
   console.log(`${signal} received, shutting down gracefully...`);
-  await browserManager.closeBrowser();
-  process.exit(0);
+  server.close(async () => {
+    console.log('HTTP server closed.');
+    await browserManager.closeBrowser();
+    process.exit(0);
+  });
 };
+
+// **FIXED**: Added global handlers to prevent silent crashes
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  // Application specific logging, throwing an error, or other logic here
+  // Forcing a shutdown is often the safest bet.
+  gracefulShutdown('unhandledRejection');
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+  // Again, forcing a graceful shutdown is a good practice.
+  gracefulShutdown('uncaughtException');
+});
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
