@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SEO Analyzer</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+            color: #555;
+        }
+        input[type="url"] {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #ddd;
+            border-radius: 5px;
+            font-size: 16px;
+            box-sizing: border-box;
+        }
+        input[type="url"]:focus {
+            outline: none;
+            border-color: #007bff;
+        }
+        .btn-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+        button {
+            flex: 1;
+            padding: 12px 20px;
+            border: none;
+            border-radius: 5px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        .btn-primary {
+            background-color: #007bff;
+            color: white;
+        }
+        .btn-primary:hover {
+            background-color: #0056b3;
+        }
+        .btn-secondary {
+            background-color: #6c757d;
+            color: white;
+        }
+        .btn-secondary:hover {
+            background-color: #545b62;
+        }
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 20px;
+            color: #666;
+        }
+        .results {
+            margin-top: 30px;
+            padding: 20px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            display: none;
+        }
+        .error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        pre {
+            background: #2d3748;
+            color: #e2e8f0;
+            padding: 15px;
+            border-radius: 5px;
+            overflow-x: auto;
+            font-size: 14px;
+        }
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        .status-online { background-color: #28a745; }
+        .status-offline { background-color: #dc3545; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔍 SEO Analyzer</h1>
+        
+        <div class="form-group">
+            <label for="urlInput">Enter URL to analyze:</label>
+            <input type="url" id="urlInput" placeholder="https://example.com" required>
+        </div>
+        
+        <div class="btn-group">
+            <button type="button" class="btn-primary" onclick="analyzeUrl()">Analyze SEO</button>
+            <button type="button" class="btn-secondary" onclick="testUrl()">Test Connectivity</button>
+        </div>
+        
+        <div class="loading" id="loading">
+            <p>🔄 Analyzing website... This may take 30-60 seconds.</p>
+        </div>
+        
+        <div class="results" id="results"></div>
+    </div>
+
+    <script>
+        async function analyzeUrl() {
+            const url = document.getElementById('urlInput').value.trim();
+            if (!url) {
+                alert('Please enter a URL');
+                return;
+            }
+
+            showLoading(true);
+            hideResults();
+
+            try {
+                const response = await fetch('/api/analyze', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ url: url })
+                });
+
+                const data = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(data.details || data.error || 'Analysis failed');
+                }
+
+                showResults(data, 'success');
+            } catch (error) {
+                showResults({ error: error.message }, 'error');
+            } finally {
+                showLoading(false);
+            }
+        }
+
+        async function testUrl() {
+            const url = document.getElementById('urlInput').value.trim();
+            if (!url) {
+                alert('Please enter a URL');
+                return;
+            }
+
+            showLoading(true);
+            hideResults();
+
+            try {
+                const response = await fetch('/api/test-url', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ url: url })
+                });
+
+                const data = await response.json();
+                showResults(data, response.ok ? 'success' : 'error');
+            } catch (error) {
+                showResults({ error: error.message }, 'error');
+            } finally {
+                showLoading(false);
+            }
+        }
+
+        function showLoading(show) {
+            document.getElementById('loading').style.display = show ? 'block' : 'none';
+        }
+
+        function hideResults() {
+            document.getElementById('results').style.display = 'none';
+        }
+
+        function showResults(data, type) {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.className = `results ${type}`;
+            
+            if (type === 'error') {
+                resultsDiv.innerHTML = `
+                    <h3>❌ Error</h3>
+                    <p><strong>Details:</strong> ${data.error || data.details || 'Unknown error'}</p>
+                    ${data.suggestions ? `
+                        <p><strong>Suggestions:</strong></p>
+                        <ul>
+                            ${data.suggestions.map(s => `<li>${s}</li>`).join('')}
+                        </ul>
+                    ` : ''}
+                `;
+            } else {
+                if (data.overallScore !== undefined) {
+                    // SEO Analysis Results
+                    resultsDiv.innerHTML = `
+                        <h3>✅ SEO Analysis Complete</h3>
+                        <p><strong>Overall Score:</strong> ${data.overallScore}/100</p>
+                        <p><strong>Analysis Time:</strong> ${data.analysisTime}ms</p>
+                        <p><strong>Summary:</strong> ${data.passed} passed, ${data.warnings} warnings, ${data.failed} failed</p>
+                        <details>
+                            <summary>View Full Results</summary>
+                            <pre>${JSON.stringify(data, null, 2)}</pre>
+                        </details>
+                    `;
+                } else {
+                    // Connectivity Test Results
+                    const dnsStatus = data.dns && !data.dns.error;
+                    const sslStatus = data.ssl && !data.ssl.error;
+                    
+                    resultsDiv.innerHTML = `
+                        <h3>🔗 Connectivity Test</h3>
+                        <p><strong>URL:</strong> ${data.url}</p>
+                        <p><strong>Hostname:</strong> ${data.hostname}</p>
+                        <p><strong>Protocol:</strong> ${data.protocol}</p>
+                        <p><span class="status-indicator ${dnsStatus ? 'status-online' : 'status-offline'}"></span><strong>DNS:</strong> ${dnsStatus ? 'Resolved' : 'Failed'}</p>
+                        ${data.ssl ? `<p><span class="status-indicator ${sslStatus ? 'status-online' : 'status-offline'}"></span><strong>SSL:</strong> ${sslStatus ? 'Valid' : 'Issues detected'}</p>` : ''}
+                        <details>
+                            <summary>View Full Details</summary>
+                            <pre>${JSON.stringify(data, null, 2)}</pre>
+                        </details>
+                    `;
+                }
+            }
+            
+            resultsDiv.style.display = 'block';
+        }
+
+        // Allow Enter key to trigger analysis
+        document.getElementById('urlInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                analyzeUrl();
+            }
+        });
+    </script>
+</body>
+</html>
