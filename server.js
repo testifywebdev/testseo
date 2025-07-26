@@ -29,90 +29,7 @@ app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// Enhanced Puppeteer configuration with better stability
-const getPuppeteerConfig = () => {
-  const isProduction = process.env.NODE_ENV === 'production';
-  const isDocker = process.env.DOCKER === 'true';
-  
-  const config = {
-    headless: 'new',
-    timeout: 60000,
-    protocolTimeout: 60000,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--no-first-run',
-      '--no-zygote',
-      '--disable-gpu',
-      '--disable-background-timer-throttling',
-      '--disable-backgrounding-occluded-windows',
-      '--disable-renderer-backgrounding',
-      '--disable-features=TranslateUI',
-      '--disable-ipc-flooding-protection',
-      '--disable-default-apps',
-      '--disable-extensions',
-      '--disable-component-extensions-with-background-pages',
-      '--disable-background-networking',
-      '--disable-sync',
-      '--metrics-recording-only',
-      '--no-default-browser-check',
-      '--mute-audio',
-      '--no-pings',
-      '--password-store=basic',
-      '--use-mock-keychain',
-      '--disable-features=VizDisplayCompositor',
-      '--disable-blink-features=AutomationControlled',
-      '--disable-web-security',
-      '--allow-running-insecure-content',
-      '--ignore-certificate-errors',
-      '--ignore-ssl-errors',
-      '--ignore-certificate-errors-spki-list'
-    ]
-  };
-
-  // Additional configuration for different environments
-  if (isProduction) {
-    config.args.push(
-      '--single-process',
-      '--disable-features=site-per-process'
-    );
-  }
-
-  if (isDocker) {
-    config.args.push('--disable-dev-shm-usage');
-    config.executablePath = '/usr/bin/chromium-browser';
-  }
-
-  // Try to use system Chrome if available
-  try {
-    if (process.platform === 'linux' && !isDocker) {
-      const possiblePaths = [
-        '/usr/bin/google-chrome',
-        '/usr/bin/google-chrome-stable',
-        '/usr/bin/chromium-browser',
-        '/usr/bin/chromium'
-      ];
-      
-      for (const chromePath of possiblePaths) {
-        try {
-          require('fs').accessSync(chromePath);
-          config.executablePath = chromePath;
-          break;
-        } catch (e) {
-          // Continue to next path
-        }
-      }
-    }
-  } catch (e) {
-    console.log('Using bundled Chromium');
-  }
-
-  return config;
-};
-
-// Enhanced browser instance manager
+// Enhanced browser instance manager with better error handling
 class BrowserManager {
   constructor() {
     this.browser = null;
@@ -120,49 +37,104 @@ class BrowserManager {
     this.maxIdleTime = 5 * 60 * 1000; // 5 minutes
     this.initAttempts = 0;
     this.maxInitAttempts = 3;
+    this.isInitializing = false; // Prevent concurrent initializations
   }
 
   async getBrowser() {
-    // Check if we need to create a new browser or if the existing one is stale
-    if (!this.browser || 
-        !this.browser.isConnected() || 
-        (this.lastUsed && Date.now() - this.lastUsed > this.maxIdleTime)) {
-      
-      if (this.browser) {
-        try {
-          await this.browser.close();
-        } catch (e) {
-          console.log('Error closing old browser:', e.message);
-        }
+    // Prevent concurrent browser initialization
+    if (this.isInitializing) {
+      // Wait for ongoing initialization
+      let attempts = 0;
+      while (this.isInitializing && attempts < 30) { // Wait up to 15 seconds
+        await new Promise(resolve => setTimeout(resolve, 500));
+        attempts++;
       }
+    }
 
-      // Retry logic for browser initialization
-      while (this.initAttempts < this.maxInitAttempts) {
-        try {
-          console.log(`Launching new browser instance (attempt ${this.initAttempts + 1}/${this.maxInitAttempts})...`);
-          this.browser = await puppeteer.launch({
-            args:[
-              '--no-sandbox',
-              '--disable-setuid-sandbox',
-              "--single-process",
-              "--no-zygote",
-            ],
-            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
-          });
-          this.initAttempts = 0; // Reset on success
-          break;
-        } catch (error) {
-          this.initAttempts++;
-          console.error(`Browser launch attempt ${this.initAttempts} failed:`, error.message);
-          
-          if (this.initAttempts >= this.maxInitAttempts) {
-            throw new Error(`Failed to launch browser after ${this.maxInitAttempts} attempts: ${error.message}`);
+    // Check if we need to create a new browser or if the existing one is stale
+    const needsNewBrowser = !this.browser || 
+                           !this.browser.isConnected() || 
+                           (this.lastUsed && Date.now() - this.lastUsed > this.maxIdleTime);
+
+    if (needsNewBrowser) {
+      this.isInitializing = true;
+      
+      try {
+        // Clean up existing browser
+        if (this.browser) {
+          try {
+            await this.browser.close();
+          } catch (e) {
+            console.log('Error closing old browser:', e.message);
           }
-          
-          // Wait before retry
-          await new Promise(resolve => setTimeout(resolve, 2000));
+          this.browser = null;
         }
+
+        // Retry logic for browser initialization
+        this.initAttempts = 0;
+        while (this.initAttempts < this.maxInitAttempts) {
+          try {
+            console.log(`Launching new browser instance (attempt ${this.initAttempts + 1}/${this.maxInitAttempts})...`);
+            
+            const browserOptions = {
+              args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--no-first-run',
+                '--no-zygote',
+                '--single-process',
+                '--disable-gpu',
+                '--disable-background-timer-throttling',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-renderer-backgrounding'
+              ],
+              executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
+              headless: true,
+              timeout: 30000
+            };
+
+            this.browser = await puppeteer.launch(browserOptions);
+            
+            // Test browser connectivity
+            const testPage = await this.browser.newPage();
+            await testPage.close();
+            
+            this.initAttempts = 0; // Reset on success
+            console.log('Browser launched successfully');
+            break;
+            
+          } catch (error) {
+            this.initAttempts++;
+            console.error(`Browser launch attempt ${this.initAttempts} failed:`, error.message);
+            
+            if (this.browser) {
+              try {
+                await this.browser.close();
+              } catch (e) {
+                // Ignore cleanup errors
+              }
+              this.browser = null;
+            }
+            
+            if (this.initAttempts >= this.maxInitAttempts) {
+              throw new Error(`Failed to launch browser after ${this.maxInitAttempts} attempts: ${error.message}`);
+            }
+            
+            // Wait before retry with exponential backoff
+            const waitTime = Math.min(2000 * Math.pow(2, this.initAttempts - 1), 10000);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+          }
+        }
+      } finally {
+        this.isInitializing = false;
       }
+    }
+
+    // Final validation
+    if (!this.browser || !this.browser.isConnected()) {
+      throw new Error('Browser is not available or connected');
     }
 
     this.lastUsed = Date.now();
@@ -174,9 +146,22 @@ class BrowserManager {
       try {
         await this.browser.close();
         this.browser = null;
+        console.log('Browser closed successfully');
       } catch (e) {
         console.log('Error closing browser:', e.message);
       }
+    }
+  }
+
+  // Check browser health
+  async isBrowserHealthy() {
+    if (!this.browser) return false;
+    
+    try {
+      const pages = await this.browser.pages();
+      return this.browser.isConnected() && Array.isArray(pages);
+    } catch (error) {
+      return false;
     }
   }
 }
@@ -187,158 +172,183 @@ const browserManager = new BrowserManager();
 async function analyzePage(targetUrl) {
   let page = null;
   let browser = null;
+  let retryCount = 0;
+  const maxRetries = 2;
   
-  try {
-    // Pre-flight check: verify URL accessibility
+  while (retryCount <= maxRetries) {
     try {
-      const urlObj = new URL(targetUrl);
-      console.log(`Pre-flight check for: ${urlObj.hostname}`);
+      // Pre-flight check: verify URL accessibility
+      try {
+        const urlObj = new URL(targetUrl);
+        console.log(`Pre-flight check for: ${urlObj.hostname} (attempt ${retryCount + 1})`);
+        
+        // Basic DNS resolution check
+        try {
+          await dns.resolve4(urlObj.hostname);
+        } catch (dnsError) {
+          throw new Error(`DNS resolution failed for ${urlObj.hostname}. The domain may not exist or be unreachable.`);
+        }
+      } catch (urlError) {
+        throw new Error(`Invalid URL format: ${urlError.message}`);
+      }
+
+      // Get browser instance with health check
+      browser = await browserManager.getBrowser();
       
-      // Basic DNS resolution check
-      try {
-        await dns.resolve4(urlObj.hostname);
-      } catch (dnsError) {
-        throw new Error(`DNS resolution failed for ${urlObj.hostname}. The domain may not exist or be unreachable.`);
+      // Double-check browser health before proceeding
+      const isHealthy = await browserManager.isBrowserHealthy();
+      if (!isHealthy) {
+        console.log('Browser health check failed, forcing restart...');
+        await browserManager.closeBrowser();
+        browser = await browserManager.getBrowser();
       }
-    } catch (urlError) {
-      throw new Error(`Invalid URL format: ${urlError.message}`);
-    }
 
-    browser = await browserManager.getBrowser();
-    
-    // Create page with enhanced error handling
-    page = await browser.newPage();
-    
-    // Enhanced page configuration
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-    await page.setViewport({ width: 1920, height: 1080 });
-    
-    // Set generous timeouts
-    page.setDefaultTimeout(45000);
-    page.setDefaultNavigationTimeout(45000);
-    
-    // Handle page errors
-    page.on('error', (error) => {
-      console.error('Page error:', error.message);
-    });
-    
-    page.on('pageerror', (error) => {
-      console.error('Page script error:', error.message);
-    });
-    
-    // Handle console messages for debugging
-    page.on('console', (msg) => {
-      if (msg.type() === 'error') {
-        console.error('Page console error:', msg.text());
+      // Create page with enhanced error handling
+      console.log('Creating new page...');
+      page = await browser.newPage();
+      
+      if (!page) {
+        throw new Error('Failed to create new page - page is null');
       }
-    });
 
-    // Enhanced navigation with multiple strategies
-    let content = null;
-    let retries = 3;
-    
-    while (retries > 0 && !content) {
-      try {
-        console.log(`Navigation attempt ${4 - retries}/3 for: ${targetUrl}`);
-        
-        // Try different wait strategies based on attempt
-        let waitUntil;
-        switch (4 - retries) {
-          case 1:
-            waitUntil = 'domcontentloaded';
-            break;
-          case 2:
-            waitUntil = 'load';
-            break;
-          case 3:
-            waitUntil = 'networkidle2';
-            break;
-        }
-        
-        const response = await page.goto(targetUrl, { 
-          waitUntil,
-          timeout: 45000 
-        });
-        
-        if (!response) {
-          throw new Error('No response received from the server');
-        }
-        
-        const status = response.status();
-        if (status >= 400) {
-          throw new Error(`HTTP ${status}: ${response.statusText()}`);
-        }
-        
-        // Additional wait for dynamic content
-        await page.waitForTimeout(3000);
-        
-        // Check if page actually loaded content
-        const title = await page.title();
-        if (!title && retries > 1) {
-          throw new Error('Page appears to be empty or not fully loaded');
-        }
-        
-        content = await page.content();
-        
-        // Validate content length
-        if (content.length < 100 && retries > 1) {
-          throw new Error('Page content appears to be incomplete');
-        }
-        
-        console.log(`Successfully loaded ${content.length} characters of content`);
-        break;
-        
-      } catch (error) {
-        console.error(`Navigation attempt ${4 - retries} failed:`, error.message);
-        retries--;
-        
-        if (retries > 0) {
-          console.log(`Retrying in 2 seconds... (${retries} attempts remaining)`);
+      // Enhanced page configuration
+      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+      await page.setViewport({ width: 1920, height: 1080 });
+      
+      // Set generous timeouts
+      page.setDefaultTimeout(30000);
+      page.setDefaultNavigationTimeout(30000);
+      
+      // Enhanced error handlers
+      page.on('error', (error) => {
+        console.error('Page error:', error.message);
+      });
+      
+      page.on('pageerror', (error) => {
+        console.error('Page script error:', error.message);
+      });
+
+      // Enhanced navigation with multiple strategies
+      let content = null;
+      let navigationRetries = 3;
+      
+      while (navigationRetries > 0 && !content) {
+        try {
+          console.log(`Navigation attempt ${4 - navigationRetries}/3 for: ${targetUrl}`);
+          
+          // Try different wait strategies based on attempt
+          let waitUntil;
+          switch (4 - navigationRetries) {
+            case 1:
+              waitUntil = 'domcontentloaded';
+              break;
+            case 2:
+              waitUntil = 'load';
+              break;
+            case 3:
+              waitUntil = 'networkidle2';
+              break;
+          }
+          
+          const response = await page.goto(targetUrl, { 
+            waitUntil,
+            timeout: 30000 
+          });
+          
+          if (!response) {
+            throw new Error('No response received from the server');
+          }
+          
+          const status = response.status();
+          console.log(`Response status: ${status}`);
+          
+          if (status >= 400) {
+            throw new Error(`HTTP ${status}: ${response.statusText()}`);
+          }
+          
+          // Additional wait for dynamic content
           await page.waitForTimeout(2000);
           
-          // Try to reload the page on certain errors
-          if (error.message.includes('Target closed') || error.message.includes('Session closed')) {
-            console.log('Attempting to create new page due to connection issues...');
-            try {
-              await page.close();
-            } catch (e) {
-              // Ignore close errors
+          // Check if page actually loaded content
+          const title = await page.title().catch(() => '');
+          console.log(`Page title: "${title}"`);
+          
+          content = await page.content();
+          
+          // Validate content length
+          if (content.length < 100 && navigationRetries > 1) {
+            throw new Error('Page content appears to be incomplete');
+          }
+          
+          console.log(`Successfully loaded ${content.length} characters of content`);
+          break;
+          
+        } catch (error) {
+          console.error(`Navigation attempt ${4 - navigationRetries} failed:`, error.message);
+          navigationRetries--;
+          
+          if (navigationRetries > 0) {
+            console.log(`Retrying navigation in 2 seconds... (${navigationRetries} attempts remaining)`);
+            await page.waitForTimeout(2000);
+          } else {
+            // Provide more specific error messages based on the error type
+            let errorMessage = error.message;
+            
+            if (error.message.includes('Target closed') || error.message.includes('Session closed')) {
+              errorMessage = 'The website connection was unexpectedly closed. This might be due to anti-bot protection or server issues.';
+            } else if (error.message.includes('timeout')) {
+              errorMessage = 'The website took too long to respond. It might be slow or experiencing high traffic.';
+            } else if (error.message.includes('net::ERR_NAME_NOT_RESOLVED')) {
+              errorMessage = 'The website domain could not be found. Please check if the URL is correct.';
+            } else if (error.message.includes('net::ERR_CONNECTION_REFUSED')) {
+              errorMessage = 'The website refused the connection. The server might be down or blocking requests.';
+            } else if (error.message.includes('net::ERR_CERT_')) {
+              errorMessage = 'There is an SSL certificate issue with this website.';
             }
-            page = await browser.newPage();
-            await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-            await page.setViewport({ width: 1920, height: 1080 });
-            page.setDefaultTimeout(45000);
-            page.setDefaultNavigationTimeout(45000);
+            
+            throw new Error(`Failed to load page after 3 navigation attempts: ${errorMessage}`);
           }
-        } else {
-          // Provide more specific error messages based on the error type
-          let errorMessage = error.message;
-          
-          if (error.message.includes('Target closed')) {
-            errorMessage = 'The website connection was unexpectedly closed. This might be due to anti-bot protection or server issues.';
-          } else if (error.message.includes('timeout')) {
-            errorMessage = 'The website took too long to respond. It might be slow or experiencing high traffic.';
-          } else if (error.message.includes('net::ERR_NAME_NOT_RESOLVED')) {
-            errorMessage = 'The website domain could not be found. Please check if the URL is correct.';
-          } else if (error.message.includes('net::ERR_CONNECTION_REFUSED')) {
-            errorMessage = 'The website refused the connection. The server might be down or blocking requests.';
-          } else if (error.message.includes('net::ERR_CERT_')) {
-            errorMessage = 'There is an SSL certificate issue with this website.';
-          }
-          
-          throw new Error(`Failed to load page after 3 attempts: ${errorMessage}`);
         }
       }
-    }
-    
-    return content;
-    
-  } finally {
-    if (page) {
-      try {
-        await page.close();
-      } catch (e) {
-        console.log('Error closing page:', e.message);
+      
+      return content;
+      
+    } catch (error) {
+      console.error(`Page analysis attempt ${retryCount + 1} failed:`, error.message);
+      
+      // Clean up page
+      if (page) {
+        try {
+          await page.close();
+        } catch (e) {
+          console.log('Error closing page:', e.message);
+        }
+        page = null;
+      }
+      
+      // If this was due to browser issues and we have retries left, restart browser
+      if (retryCount < maxRetries && 
+          (error.message.includes('Target closed') || 
+           error.message.includes('Session closed') ||
+           error.message.includes('Browser is not available') ||
+           error.message.includes('page is null'))) {
+        
+        console.log(`Browser-related error detected, restarting browser for retry ${retryCount + 1}...`);
+        await browserManager.closeBrowser();
+        retryCount++;
+        continue;
+      }
+      
+      // If no more retries or non-browser error, throw the error
+      throw error;
+    } finally {
+      // Always clean up the page
+      if (page) {
+        try {
+          await page.close();
+        } catch (e) {
+          console.log('Error closing page in finally block:', e.message);
+        }
       }
     }
   }
@@ -813,13 +823,19 @@ app.post('/api/analyze', async (req, res) => {
   }
 });
 
-// Separate Lighthouse analysis function
+// Separate Lighthouse analysis function with better error handling
 async function runLighthouseAnalysis(targetUrl) {
   let chrome = null;
   
   try {
     chrome = await chromeLauncher.launch({ 
-      chromeFlags: ['--headless', '--no-sandbox', '--disable-gpu'] 
+      chromeFlags: [
+        '--headless',
+        '--no-sandbox',
+        '--disable-gpu',
+        '--disable-dev-shm-usage',
+        '--disable-setuid-sandbox'
+      ]
     });
     
     const options = {
@@ -829,6 +845,8 @@ async function runLighthouseAnalysis(targetUrl) {
       port: chrome.port,
       maxWaitForFcp: 15 * 1000,
       maxWaitForLoad: 35 * 1000,
+      disableDeviceEmulation: false,
+      emulatedFormFactor: 'desktop'
     };
 
     const runnerResult = await lighthouse(targetUrl, options);
@@ -851,7 +869,11 @@ async function runLighthouseAnalysis(targetUrl) {
     }
   } finally {
     if (chrome) {
-      await chrome.kill();
+      try {
+        await chrome.kill();
+      } catch (error) {
+        console.error('Error killing Chrome:', error.message);
+      }
     }
   }
 }
@@ -922,13 +944,50 @@ async function getDNSInfo(hostname) {
 }
 
 // Health check endpoint
-app.get('/api/health', (req, res) => {
+app.get('/api/health', async (req, res) => {
+  const browserHealth = await browserManager.isBrowserHealthy();
+  
   res.json({ 
     status: 'OK', 
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
-    memory: process.memoryUsage()
+    memory: process.memoryUsage(),
+    browserHealthy: browserHealth
   });
+});
+
+// Browser status endpoint for debugging
+app.get('/api/browser-status', async (req, res) => {
+  try {
+    const isHealthy = await browserManager.isBrowserHealthy();
+    res.json({
+      browserExists: !!browserManager.browser,
+      browserConnected: browserManager.browser ? browserManager.browser.isConnected() : false,
+      browserHealthy: isHealthy,
+      lastUsed: browserManager.lastUsed,
+      initAttempts: browserManager.initAttempts,
+      isInitializing: browserManager.isInitializing
+    });
+  } catch (error) {
+    res.json({
+      error: error.message,
+      browserExists: !!browserManager.browser,
+      browserConnected: false,
+      browserHealthy: false
+    });
+  }
+});
+
+// Force browser restart endpoint for debugging
+app.post('/api/restart-browser', async (req, res) => {
+  try {
+    console.log('Force restarting browser...');
+    await browserManager.closeBrowser();
+    await browserManager.getBrowser(); // This will create a new one
+    res.json({ message: 'Browser restarted successfully' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to restart browser', details: error.message });
+  }
 });
 
 // Graceful shutdown handling
@@ -944,6 +1003,18 @@ process.on('SIGINT', async () => {
   process.exit(0);
 });
 
+// Handle uncaught exceptions
+process.on('uncaughtException', async (error) => {
+  console.error('Uncaught Exception:', error);
+  await browserManager.closeBrowser();
+  process.exit(1);
+});
+
+process.on('unhandledRejection', async (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  // Don't exit on unhandled rejection, just log it
+});
+
 // Error handling middleware
 app.use((error, req, res, next) => {
   console.error('Unhandled error:', error);
@@ -957,5 +1028,5 @@ app.use((error, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`SEO Analyzer server running on port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`Puppeteer config: ${JSON.stringify(getPuppeteerConfig(), null, 2)}`);
+  console.log('Server started successfully');
 });
