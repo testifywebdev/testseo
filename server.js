@@ -88,11 +88,15 @@ class BrowserManager {
                 '--disable-gpu',
                 '--disable-background-timer-throttling',
                 '--disable-backgrounding-occluded-windows',
-                '--disable-renderer-backgrounding'
+                '--disable-renderer-backgrounding',
+                '--disable-features=TranslateUI',
+                '--disable-ipc-flooding-protection',
+                '--disable-web-security',
+                '--disable-features=VizDisplayCompositor'
               ],
-              
               headless: true,
               timeout: 30000
+              // Removed executablePath - let Puppeteer find Chrome automatically
             };
 
             this.browser = await puppeteer.launch(browserOptions);
