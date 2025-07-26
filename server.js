@@ -90,7 +90,7 @@ class BrowserManager {
                 '--disable-backgrounding-occluded-windows',
                 '--disable-renderer-backgrounding'
               ],
-              executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
+              
               headless: true,
               timeout: 30000
             };
